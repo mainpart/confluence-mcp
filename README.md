@@ -1,20 +1,12 @@
 # confluence-mcp
 
-MCP server for Confluence REST API. 7 read-only tools. Bearer token (PAT) auth.
+MCP server for Confluence REST API. 4 read-only tools. Bearer token (PAT) auth.
 
 API documentation:
 - [REST API v1](https://developer.atlassian.com/cloud/confluence/rest/v1/)
 - [REST API v2](https://developer.atlassian.com/cloud/confluence/rest/v2/)
 
 ## Setup
-
-```bash
-# install
-uv pip install -e .
-
-# or run directly
-uv run confluence-mcp
-```
 
 ### Environment variables
 
@@ -34,8 +26,8 @@ uv run confluence-mcp
 {
   "mcpServers": {
     "confluence": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/confluence-mcp", "confluence-mcp"],
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/mainpart/confluence-mcp", "confluence-mcp"],
       "env": {
         "CONFLUENCE_URL": "https://wiki.example.com/rest/api",
         "CONFLUENCE_TOKEN": "your-pat-token"
@@ -53,8 +45,8 @@ uv run confluence-mcp
 {
   "mcpServers": {
     "confluence": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/confluence-mcp", "confluence-mcp"],
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/mainpart/confluence-mcp", "confluence-mcp"],
       "env": {
         "CONFLUENCE_URL": "https://wiki.example.com/rest/api",
         "CONFLUENCE_TOKEN": "your-pat-token"
@@ -66,12 +58,12 @@ uv run confluence-mcp
 
 ## Tools (4)
 
-| Tool | Method | Path | Description |
-|---|---|---|---|
-| `getContentById` | GET | `/content/{id}` | Read a page by ID |
-| `downloadAttachment` | GET | `/content/{id}/child/attachment/{attachmentId}/download` | Download attachment |
-| `getSpaces` | GET | `/space` | List spaces |
-| `searchContentByCQL` | GET | `/content/search` | Search content by CQL |
+| Tool | Description |
+|---|---|
+| `get_content_by_id` | Get content by ID with optional expand and status |
+| `download_attachment` | Download attachment by content ID and attachment ID |
+| `get_spaces` | List/filter spaces by key, type, status, label |
+| `search_content` | Search content by text query, optionally filter by space and type |
 
 ## License
 

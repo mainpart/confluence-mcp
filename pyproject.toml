@@ -1,0 +1,13 @@
+[project]
+name = "confluence-mcp"
+version = "0.1.0"
+description = "MCP server for Confluence REST API"
+requires-python = ">=3.11"
+dependencies = ["fastmcp", "httpx"]
+
+[project.scripts]
+confluence-mcp = "confluence_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
