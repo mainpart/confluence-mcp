@@ -93,7 +93,7 @@ async def get_content_by_id(
     expand: str | None = None,
     status: str | None = None,
 ) -> str:
-    """Get content by ID. Returns title, body (HTML), space, version info, ancestors, labels, and attachments."""
+    """Get content by ID. Returns title, body (storage format HTML), space, version, ancestors, child pages, attachments."""
     default_expand = "body.storage,version,history,space,ancestors,children.page,children.attachment"
     params: dict = {"expand": expand or default_expand}
     if status:

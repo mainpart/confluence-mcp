@@ -7,6 +7,7 @@ Single file: `src/confluence_mcp/server.py`. Auth: Bearer token (PAT).
 
 ```
 src/confluence_mcp/server.py   — all MCP tools and ConfluenceClient
+src/confluence_mcp/__main__.py — python -m support
 api/confluence-openapi-v1.json — Confluence REST API v1 OpenAPI spec
 api/confluence-openapi-v2.json — Confluence REST API v2 OpenAPI spec
 pyproject.toml                 — package config, dependencies: httpx, fastmcp
@@ -17,7 +18,8 @@ pyproject.toml                 — package config, dependencies: httpx, fastmcp
 - `get_content_by_id(id)` — page with body, ancestors, child pages, attachments
 - `download_attachment(id, attachment_id)` — download attachment content
 - `get_spaces()` — list spaces (key + name)
-- `search(query | cql)` — text search or raw CQL
+- `get_comments(id)` — footer + inline comments with markerRef/originalSelection
+- `search(query, title, space_key, ...)` — full-text search with CQL filters
 
 ## Adding new tools
 
@@ -25,6 +27,7 @@ pyproject.toml                 — package config, dependencies: httpx, fastmcp
 2. Add a `@mcp.tool()` async function in `server.py`
 3. Use `conf.request(method, path, params=..., json_data=...)` for API calls
 4. **Always post-process the response** — see "Output optimization" below
+5. **Do not expose `expand` as a tool parameter** — each tool fixes its own expand and post-processes accordingly
 
 ### Tool template
 
@@ -40,6 +43,17 @@ async def my_tool(param: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 ```
 
+## Expand strategy
+
+Each tool hardcodes its own `expand` parameter — **never expose it to the LLM**.
+Post-processing depends on knowing exactly which fields are present.
+
+| Tool | expand | Why |
+|---|---|---|
+| `get_content_by_id` | `body.storage,version,history,space,ancestors,children.page,children.attachment` | Full page context for LLM |
+| `get_comments` | `body.storage,version,extensions.inlineProperties` | Comment text + inline marker binding |
+| `search` | `space,version` | Lightweight results for listing |
+
 ## Output optimization
 
 Confluence API returns ~60-70% noise per response. Every tool MUST strip it.
@@ -54,6 +68,8 @@ Confluence API returns ~60-70% noise per response. Every tool MUST strip it.
 - `type` when always the same (e.g. "page", "attachment", "global")
 - `status` when always "current"
 - Pagination `_links` — replace with `hasMore: bool`
+
+**Exception:** `get_comments` keeps `_links.webui` as `link` field for direct comment navigation.
 
 ### What to keep
 
@@ -71,6 +87,16 @@ Confluence API returns ~60-70% noise per response. Every tool MUST strip it.
 - `body.styled_view` (~80KB) — full HTML page with embedded CSS, never use
 - `body.view` embeds base64 `data-diagramdata` blobs (~1.2KB each) for draw.io — pure noise for LLM
 - `body.storage` keeps draw.io as a small `<ac:structured-macro>` tag (~200 bytes)
+
+### Inline comments in body.storage
+
+`body.storage` contains inline comment markers:
+```xml
+<ac:inline-comment-marker ac:ref="UUID">highlighted text</ac:inline-comment-marker>
+```
+
+`get_comments` returns `markerRef` (the UUID) for each inline comment — use it to locate
+the exact position in page body. `originalSelection` is the text snapshot at comment creation time.
 
 ### Attachment patterns
 
