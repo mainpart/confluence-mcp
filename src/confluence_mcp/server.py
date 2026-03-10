@@ -93,13 +93,48 @@ async def get_content_by_id(
     expand: str | None = None,
     status: str | None = None,
 ) -> str:
-    """Get content by ID. expand: e.g. 'body.storage,version,space'. status: current/trashed/draft."""
-    params = {}
-    if expand:
-        params["expand"] = expand
+    """Get content by ID. Returns title, body (HTML), space, version info, ancestors, labels, and attachments."""
+    default_expand = "body.storage,version,history,space,ancestors,children.page,children.attachment"
+    params: dict = {"expand": expand or default_expand}
     if status:
         params["status"] = status
-    return await conf.request("GET", f"/content/{id}", params=params)
+    raw = json.loads(await conf.request("GET", f"/content/{id}", params=params))
+
+    version = raw.get("version", {})
+    history = raw.get("history", {})
+    created_by = history.get("createdBy", {})
+    space = raw.get("space", {})
+    ancestors = raw.get("ancestors", [])
+    attachments = raw.get("children", {}).get("attachment", {}).get("results", [])
+    child_pages = raw.get("children", {}).get("page", {}).get("results", [])
+
+    result: dict = {
+        "id": raw.get("id"),
+        "title": raw.get("title"),
+        "status": raw.get("status"),
+        "spaceKey": space.get("key"),
+        "createdBy": created_by.get("displayName"),
+        "createdByUsername": created_by.get("username"),
+        "createdDate": history.get("createdDate"),
+        "version": version.get("number"),
+        "lastUpdated": version.get("when"),
+        "lastUpdatedBy": version.get("by", {}).get("displayName"),
+        "lastUpdatedByUsername": version.get("by", {}).get("username"),
+        "ancestors": [{"id": a.get("id"), "title": a.get("title")} for a in ancestors],
+        "childPages": [{"id": p.get("id"), "title": p.get("title")} for p in child_pages],
+        "attachments": [
+            {
+                "id": a.get("id"),
+                "title": a.get("title"),
+                "mediaType": a.get("extensions", {}).get("mediaType"),
+                "fileSize": a.get("extensions", {}).get("fileSize"),
+                "download": a.get("_links", {}).get("download"),
+            }
+            for a in attachments
+        ],
+        "body": raw.get("body", {}).get("storage", {}).get("value", ""),
+    }
+    return json.dumps(result, ensure_ascii=False)
 
 
 # ===========================================================================
@@ -144,11 +179,10 @@ async def get_spaces(
     status: str | None = None,
     label: str | None = None,
     favourite: bool | None = None,
-    expand: str | None = None,
     start: int | None = None,
     limit: int | None = None,
 ) -> str:
-    """Get spaces. Filter by space_key, type (global/personal), status, label, favourite."""
+    """Get spaces. Returns key and name. Filter by space_key, type (global/personal), status, label, favourite."""
     params = {}
     if space_key:
         params["spaceKey"] = space_key
@@ -160,13 +194,84 @@ async def get_spaces(
         params["label"] = label
     if favourite is not None:
         params["favourite"] = favourite
-    if expand:
-        params["expand"] = expand
     if start is not None:
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    return await conf.request("GET", "/space", params=params)
+    raw = json.loads(await conf.request("GET", "/space", params=params))
+    spaces = [{"key": s["key"], "name": s["name"]} for s in raw.get("results", [])]
+    has_more = "next" in raw.get("_links", {})
+    return json.dumps(
+        {"spaces": spaces, "start": raw.get("start"), "size": raw.get("size"), "hasMore": has_more},
+        ensure_ascii=False,
+    )
+
+
+# ===========================================================================
+# Comments
+# ===========================================================================
+
+
+@mcp.tool()
+async def get_comments(
+    id: str,
+    depth: str | None = None,
+    start: int | None = None,
+    limit: int | None = None,
+) -> str:
+    """Get comments on a page by content ID.
+
+    Returns footer and inline comments. Inline comments have markerRef —
+    UUID of <ac:inline-comment-marker> in page body.storage.
+
+    Args:
+        id: content ID of the page
+        depth: '' (top-level only, default) or 'all' (include replies)
+        start: pagination offset
+        limit: max results (default 25)
+    """
+    params: dict = {"expand": "body.storage,version,extensions.inlineProperties"}
+    if depth:
+        params["depth"] = depth
+    if start is not None:
+        params["start"] = start
+    if limit is not None:
+        params["limit"] = limit
+    raw = json.loads(
+        await conf.request("GET", f"/content/{id}/child/comment", params=params)
+    )
+    if isinstance(raw, str):
+        return raw
+    comments = []
+    for c in raw.get("results", []):
+        ver = c.get("version", {})
+        ext = c.get("extensions", {})
+        inline = ext.get("inlineProperties", {})
+        location = ext.get("location", "footer")
+        comment: dict = {
+            "id": c.get("id"),
+            "author": ver.get("by", {}).get("displayName"),
+            "created": ver.get("when"),
+            "location": location,
+            "body": c.get("body", {}).get("storage", {}).get("value", ""),
+            "link": c.get("_links", {}).get("webui"),
+        }
+        if location == "inline":
+            if inline.get("markerRef"):
+                comment["markerRef"] = inline["markerRef"]
+            if inline.get("originalSelection"):
+                comment["originalSelection"] = inline["originalSelection"]
+        comments.append(comment)
+    has_more = "next" in raw.get("_links", {})
+    return json.dumps(
+        {
+            "comments": comments,
+            "start": raw.get("start"),
+            "size": raw.get("size"),
+            "hasMore": has_more,
+        },
+        ensure_ascii=False,
+    )
 
 
 # ===========================================================================
@@ -175,29 +280,83 @@ async def get_spaces(
 
 
 @mcp.tool()
-async def search_content(
-    query: str,
+async def search(
+    query: str | None = None,
+    title: str | None = None,
     space_key: str | None = None,
     type: str | None = None,
-    expand: str | None = None,
+    contributor: str | None = None,
+    creator: str | None = None,
+    label: str | None = None,
+    ancestor: str | None = None,
+    parent: str | None = None,
+    created_from: str | None = None,
+    modified_from: str | None = None,
     start: int | None = None,
     limit: int | None = None,
 ) -> str:
-    """Search content. query: text to search for. Optionally filter by space_key and type (page/blogpost/comment/attachment)."""
-    cql_parts = [f'text~"{query}"']
+    """Search Confluence. All filters are combined with AND.
+
+    Args:
+        query: full-text search
+        title: title contains (fuzzy match)
+        space_key: space key (exact)
+        type: page, blogpost, comment, attachment
+        contributor: username who edited
+        creator: username who created
+        label: page label
+        ancestor: ancestor page ID (all descendants)
+        parent: direct parent page ID
+        created_from: created >= date (YYYY-MM-DD)
+        modified_from: lastModified >= date (YYYY-MM-DD)
+    """
+    cql_parts = []
+    if query:
+        cql_parts.append(f'text~"{query}"')
+    if title:
+        cql_parts.append(f'title~"{title}"')
     if space_key:
         cql_parts.append(f'space="{space_key}"')
     if type:
         cql_parts.append(f'type="{type}"')
-    cql = " AND ".join(cql_parts)
-    params: dict = {"cql": cql}
-    if expand:
-        params["expand"] = expand
+    if contributor:
+        cql_parts.append(f'contributor="{contributor}"')
+    if creator:
+        cql_parts.append(f'creator="{creator}"')
+    if label:
+        cql_parts.append(f'label="{label}"')
+    if ancestor:
+        cql_parts.append(f'ancestor="{ancestor}"')
+    if parent:
+        cql_parts.append(f'parent="{parent}"')
+    if created_from:
+        cql_parts.append(f'created>="{created_from}"')
+    if modified_from:
+        cql_parts.append(f'lastModified>="{modified_from}"')
+    if not cql_parts:
+        return json.dumps({"error": "Provide at least one search parameter"})
+    params: dict = {"cql": " AND ".join(cql_parts), "expand": "space,version"}
     if start is not None:
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    return await conf.request("GET", "/content/search", params=params)
+    raw = json.loads(await conf.request("GET", "/content/search", params=params))
+    results = []
+    for item in raw.get("results", []):
+        ver = item.get("version", {})
+        results.append({
+            "id": item.get("id"),
+            "title": item.get("title"),
+            "type": item.get("type"),
+            "spaceKey": item.get("space", {}).get("key"),
+            "lastUpdated": ver.get("when"),
+            "lastUpdatedBy": ver.get("by", {}).get("displayName"),
+        })
+    has_more = "next" in raw.get("_links", {})
+    return json.dumps(
+        {"results": results, "start": raw.get("start"), "size": raw.get("size"), "totalSize": raw.get("totalSize"), "hasMore": has_more},
+        ensure_ascii=False,
+    )
 
 
 # ===========================================================================
