@@ -10,6 +10,7 @@ API docs:
 
 import json
 import os
+from urllib.parse import urljoin
 
 import httpx
 from fastmcp import FastMCP
@@ -173,10 +174,23 @@ async def get_content_by_id(
 async def download_attachment(
     id: str, attachment_id: str, save_path: str | None = None
 ) -> str:
-    """Download attachment. Returns text content or saves to save_path for binary files."""
-    result = await conf.request(
-        "GET", f"/content/{id}/child/attachment/{attachment_id}/download", raw=True
-    )
+    """Download attachment content.
+
+    Args:
+        id: page content ID (unused, kept for compatibility)
+        attachment_id: the 'download' field from get_content_by_id attachments,
+            e.g. "/download/attachments/123/file?version=1&api=v2"
+        save_path: if set, save to this file instead of returning to LLM
+    """
+    url = urljoin(conf.base_url, attachment_id)
+    headers = {"Authorization": f"Bearer {conf.token}"}
+    async with httpx.AsyncClient(verify=conf.verify_ssl) as client:
+        try:
+            resp = await client.get(url, headers=headers, timeout=30.0, follow_redirects=True)
+            resp.raise_for_status()
+            result = resp.content
+        except httpx.HTTPError as e:
+            return f"Error downloading: {e}"
     if isinstance(result, str):
         return result
     if save_path:
