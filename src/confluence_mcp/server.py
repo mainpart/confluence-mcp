@@ -82,6 +82,27 @@ conf = ConfluenceClient(
 mcp = FastMCP("confluence")
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _maybe_save(json_str: str, save_path: str | None) -> str:
+    """If save_path given, write JSON to file and return short confirmation."""
+    if not save_path:
+        return json_str
+    try:
+        save_path = os.path.abspath(save_path)
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        with open(save_path, "w", encoding="utf-8") as f:
+            data = json.loads(json_str)
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        size = os.path.getsize(save_path)
+        return f"Saved to {save_path} ({size} bytes)"
+    except Exception as e:
+        return f"Error saving to {save_path}: {e}"
+
+
 # ===========================================================================
 # Content — Read
 # ===========================================================================
@@ -92,8 +113,14 @@ async def get_content_by_id(
     id: str,
     expand: str | None = None,
     status: str | None = None,
+    save_path: str | None = None,
 ) -> str:
-    """Get content by ID. Returns title, body (storage format HTML), space, version, ancestors, child pages, attachments."""
+    """Get content by ID. Returns title, body (storage format HTML), space, version, ancestors, child pages, attachments.
+
+    Args:
+        id: content ID
+        save_path: if set, save JSON to this file instead of returning to LLM
+    """
     default_expand = "body.storage,version,history,space,ancestors,children.page,children.attachment"
     params: dict = {"expand": expand or default_expand}
     if status:
@@ -134,7 +161,7 @@ async def get_content_by_id(
         ],
         "body": raw.get("body", {}).get("storage", {}).get("value", ""),
     }
-    return json.dumps(result, ensure_ascii=False)
+    return _maybe_save(json.dumps(result, ensure_ascii=False), save_path)
 
 
 # ===========================================================================
@@ -181,8 +208,13 @@ async def get_spaces(
     favourite: bool | None = None,
     start: int | None = None,
     limit: int | None = None,
+    save_path: str | None = None,
 ) -> str:
-    """Get spaces. Returns key and name. Filter by space_key, type (global/personal), status, label, favourite."""
+    """Get spaces. Returns key and name. Filter by space_key, type (global/personal), status, label, favourite.
+
+    Args:
+        save_path: if set, save JSON to this file instead of returning to LLM
+    """
     params = {}
     if space_key:
         params["spaceKey"] = space_key
@@ -201,10 +233,11 @@ async def get_spaces(
     raw = json.loads(await conf.request("GET", "/space", params=params))
     spaces = [{"key": s["key"], "name": s["name"]} for s in raw.get("results", [])]
     has_more = "next" in raw.get("_links", {})
-    return json.dumps(
+    result = json.dumps(
         {"spaces": spaces, "start": raw.get("start"), "size": raw.get("size"), "hasMore": has_more},
         ensure_ascii=False,
     )
+    return _maybe_save(result, save_path)
 
 
 # ===========================================================================
@@ -218,6 +251,7 @@ async def get_comments(
     depth: str | None = None,
     start: int | None = None,
     limit: int | None = None,
+    save_path: str | None = None,
 ) -> str:
     """Get comments on a page by content ID.
 
@@ -229,6 +263,7 @@ async def get_comments(
         depth: '' (top-level only, default) or 'all' (include replies)
         start: pagination offset
         limit: max results (default 25)
+        save_path: if set, save JSON to this file instead of returning to LLM
     """
     params: dict = {"expand": "body.storage,version,extensions.inlineProperties"}
     if depth:
@@ -263,7 +298,7 @@ async def get_comments(
                 comment["originalSelection"] = inline["originalSelection"]
         comments.append(comment)
     has_more = "next" in raw.get("_links", {})
-    return json.dumps(
+    result = json.dumps(
         {
             "comments": comments,
             "start": raw.get("start"),
@@ -272,6 +307,7 @@ async def get_comments(
         },
         ensure_ascii=False,
     )
+    return _maybe_save(result, save_path)
 
 
 # ===========================================================================
@@ -294,6 +330,7 @@ async def search(
     modified_from: str | None = None,
     start: int | None = None,
     limit: int | None = None,
+    save_path: str | None = None,
 ) -> str:
     """Search Confluence. All filters are combined with AND.
 
@@ -309,6 +346,7 @@ async def search(
         parent: direct parent page ID
         created_from: created >= date (YYYY-MM-DD)
         modified_from: lastModified >= date (YYYY-MM-DD)
+        save_path: if set, save JSON to this file instead of returning to LLM
     """
     cql_parts = []
     if query:
@@ -353,10 +391,11 @@ async def search(
             "lastUpdatedBy": ver.get("by", {}).get("displayName"),
         })
     has_more = "next" in raw.get("_links", {})
-    return json.dumps(
+    result = json.dumps(
         {"results": results, "start": raw.get("start"), "size": raw.get("size"), "totalSize": raw.get("totalSize"), "hasMore": has_more},
         ensure_ascii=False,
     )
+    return _maybe_save(result, save_path)
 
 
 # ===========================================================================
