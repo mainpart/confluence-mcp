@@ -7,10 +7,8 @@ Single file: `src/confluence_mcp/server.py`. Auth: Bearer token (PAT).
 
 ```
 src/confluence_mcp/server.py   — all MCP tools and ConfluenceClient
-src/confluence_mcp/__main__.py — python -m support
 api/confluence-openapi-v1.json — Confluence REST API v1 OpenAPI spec
 api/confluence-openapi-v2.json — Confluence REST API v2 OpenAPI spec
-pyproject.toml                 — package config, dependencies: httpx, fastmcp
 ```
 
 ## Current tools
@@ -18,7 +16,7 @@ pyproject.toml                 — package config, dependencies: httpx, fastmcp
 - `get_content_by_id(id)` — page with body, ancestors, child pages, attachments
 - `download_attachment(id, attachment_id)` — download attachment content
 - `get_spaces()` — list spaces (key + name)
-- `get_comments(id)` — footer + inline comments with markerRef/originalSelection
+- `get_comments(id, depth, ...)` — footer + inline comments with markerRef/originalSelection, reply threads via parentId/replyCount. Pass comment ID to get its reply thread.
 - `search(query, title, space_key, ...)` — full-text search with CQL filters
 
 ## Adding new tools
@@ -51,7 +49,7 @@ Post-processing depends on knowing exactly which fields are present.
 | Tool | expand | Why |
 |---|---|---|
 | `get_content_by_id` | `body.storage,version,history,space,ancestors,children.page,children.attachment` | Full page context for LLM |
-| `get_comments` | `body.storage,version,extensions.inlineProperties` | Comment text + inline marker binding |
+| `get_comments` | `body.storage,version,extensions.inlineProperties,ancestors,children.comment` | Comment text + inline marker binding + reply tree |
 | `search` | `space,version` | Lightweight results for listing |
 
 ## Output optimization
@@ -97,6 +95,13 @@ Confluence API returns ~60-70% noise per response. Every tool MUST strip it.
 
 `get_comments` returns `markerRef` (the UUID) for each inline comment — use it to locate
 the exact position in page body. `originalSelection` is the text snapshot at comment creation time.
+
+### Comment threads
+
+- Top-level comments have `replyCount` (only if > 0) showing number of replies
+- Reply comments have `parentId` pointing to the parent comment ID
+- `depth` param: omit for top-level only, `"all"` to include replies (pages only, not comment threads)
+- Pass a comment ID instead of page ID to `get_comments` to fetch a specific reply thread
 
 ### Attachment patterns
 

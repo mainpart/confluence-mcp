@@ -9,11 +9,24 @@ API docs:
 """
 
 import json
+import logging
 import os
+import sys
 from urllib.parse import urljoin
 
 import httpx
 from fastmcp import FastMCP
+
+# ---------------------------------------------------------------------------
+# Logging — writes to stderr so it doesn't interfere with MCP stdio transport
+# ---------------------------------------------------------------------------
+
+log = logging.getLogger("confluence_mcp")
+log.setLevel(os.environ.get("CONFLUENCE_LOG_LEVEL", "WARNING").upper())
+if not log.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    log.addHandler(_handler)
 
 # ---------------------------------------------------------------------------
 # ConfluenceClient
@@ -44,6 +57,7 @@ class ConfluenceClient:
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
         }
+        log.debug("%s %s params=%s", method, url, params)
         async with httpx.AsyncClient(verify=self.verify_ssl) as client:
             try:
                 resp = await client.request(
@@ -55,6 +69,9 @@ class ConfluenceClient:
                     timeout=30.0,
                     follow_redirects=True,
                 )
+                log.debug("Response %s, %d bytes, content-type=%s",
+                          resp.status_code, len(resp.content),
+                          resp.headers.get("content-type", "?"))
                 resp.raise_for_status()
                 if raw:
                     return resp.content
@@ -63,10 +80,13 @@ class ConfluenceClient:
                 return json.dumps(resp.json(), separators=(",", ":"), ensure_ascii=False)
             except httpx.HTTPStatusError as e:
                 body = e.response.text[:500] if e.response else ""
+                log.warning("%s %s → HTTP %s: %s", method, path, e.response.status_code, body[:200])
                 return f"HTTP {e.response.status_code}: {body}"
             except httpx.HTTPError as e:
+                log.warning("%s %s → %s", method, path, e)
                 return f"Error: {e}"
             except Exception as e:
+                log.exception("%s %s → unexpected error", method, path)
                 return f"Unexpected error: {e}"
 
 
@@ -86,6 +106,26 @@ mcp = FastMCP("confluence")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class ConfluenceAPIError(Exception):
+    """Raised when conf.request() returns a non-JSON error string."""
+    pass
+
+
+def _parse_response(raw_str: str) -> dict | list:
+    """Parse JSON response from conf.request(), raising on API errors.
+
+    conf.request() returns valid compact JSON on success, or a plain-text
+    error string (e.g. "HTTP 403: ...", "Error: ...") on failure.
+    json.loads() on such strings produces the cryptic
+    "Expecting value: line 1 column 1" — this helper gives a clear message.
+    """
+    try:
+        return json.loads(raw_str)
+    except (json.JSONDecodeError, ValueError):
+        log.error("Non-JSON API response: %s", raw_str[:300])
+        raise ConfluenceAPIError(raw_str)
 
 
 def _maybe_save(json_str: str, save_path: str | None) -> str:
@@ -126,7 +166,7 @@ async def get_content_by_id(
     params: dict = {"expand": expand or default_expand}
     if status:
         params["status"] = status
-    raw = json.loads(await conf.request("GET", f"/content/{id}", params=params))
+    raw = _parse_response(await conf.request("GET", f"/content/{id}", params=params))
 
     version = raw.get("version", {})
     history = raw.get("history", {})
@@ -244,7 +284,7 @@ async def get_spaces(
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    raw = json.loads(await conf.request("GET", "/space", params=params))
+    raw = _parse_response(await conf.request("GET", "/space", params=params))
     spaces = [{"key": s["key"], "name": s["name"]} for s in raw.get("results", [])]
     has_more = "next" in raw.get("_links", {})
     result = json.dumps(
@@ -267,30 +307,30 @@ async def get_comments(
     limit: int | None = None,
     save_path: str | None = None,
 ) -> str:
-    """Get comments on a page by content ID.
+    """Get comments on a page or comment thread by content ID.
 
     Returns footer and inline comments. Inline comments have markerRef —
     UUID of <ac:inline-comment-marker> in page body.storage.
+    Pass a comment ID to get its reply thread.
 
     Args:
-        id: content ID of the page
-        depth: '' (top-level only, default) or 'all' (include replies)
+        id: page content ID or comment ID (to get reply thread)
+        depth: 'all' (include replies, default for pages) or '' (top-level only).
+               Ignored when querying a comment thread.
         start: pagination offset
         limit: max results (default 25)
         save_path: if set, save JSON to this file instead of returning to LLM
     """
-    params: dict = {"expand": "body.storage,version,extensions.inlineProperties"}
+    params: dict = {"expand": "body.storage,version,extensions.inlineProperties,ancestors,children.comment"}
     if depth:
         params["depth"] = depth
     if start is not None:
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    raw = json.loads(
+    raw = _parse_response(
         await conf.request("GET", f"/content/{id}/child/comment", params=params)
     )
-    if isinstance(raw, str):
-        return raw
     comments = []
     for c in raw.get("results", []):
         ver = c.get("version", {})
@@ -305,6 +345,12 @@ async def get_comments(
             "body": c.get("body", {}).get("storage", {}).get("value", ""),
             "link": c.get("_links", {}).get("webui"),
         }
+        ancestors = c.get("ancestors", [])
+        if ancestors:
+            comment["parentId"] = ancestors[-1].get("id")
+        reply_count = c.get("children", {}).get("comment", {}).get("size", 0)
+        if reply_count:
+            comment["replyCount"] = reply_count
         if location == "inline":
             if inline.get("markerRef"):
                 comment["markerRef"] = inline["markerRef"]
@@ -392,7 +438,7 @@ async def search(
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    raw = json.loads(await conf.request("GET", "/content/search", params=params))
+    raw = _parse_response(await conf.request("GET", "/content/search", params=params))
     results = []
     for item in raw.get("results", []):
         ver = item.get("version", {})

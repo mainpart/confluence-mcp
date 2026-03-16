@@ -1,6 +1,6 @@
 # confluence-mcp
 
-MCP server for Confluence REST API. 5 read-only tools. Bearer token (PAT) auth.
+MCP server for Confluence REST API. Bearer token (PAT) auth.
 
 API documentation:
 - [REST API v1](https://developer.atlassian.com/cloud/confluence/rest/v1/)
@@ -15,8 +15,16 @@ API documentation:
 | `CONFLUENCE_URL` | yes | REST API base URL, e.g. `https://wiki.example.com/rest/api` |
 | `CONFLUENCE_TOKEN` | yes | Personal Access Token |
 | `CONFLUENCE_VERIFY_SSL` | no | `true` (default) / `false` |
-| `MCP_TRANSPORT` | no | `stdio` (default), `sse`, `streamable-http` |
-| `MCP_HOST` / `MCP_PORT` | no | For sse/streamable-http (default `0.0.0.0:8000`) |
+
+### Creating a Personal Access Token (PAT)
+
+```bash
+curl -s -u 'your-username:your-password' \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"name":"my-mcp-token"}' \
+  "https://wiki.example.com/rest/pat/latest/tokens"
+# Save rawToken from the response — it won't be shown again
+```
 
 ### Claude Desktop / Claude Code — uvx (no install)
 
@@ -35,50 +43,6 @@ API documentation:
 }
 ```
 
-### pip install
-
-```bash
-pip install git+https://github.com/mainpart/confluence-mcp
-```
-
-Then configure the MCP client:
-
-```json
-{
-  "mcpServers": {
-    "confluence": {
-      "command": "confluence-mcp",
-      "env": {
-        "CONFLUENCE_URL": "https://wiki.example.com/rest/api",
-        "CONFLUENCE_TOKEN": "your-pat-token"
-      }
-    }
-  }
-}
-```
-
-Or run directly:
-
-```bash
-export CONFLUENCE_URL="https://wiki.example.com/rest/api"
-export CONFLUENCE_TOKEN="your-pat-token"
-confluence-mcp
-```
-
-### Run from source
-
-```bash
-git clone https://github.com/mainpart/confluence-mcp
-cd confluence-mcp
-pip install -e .
-confluence-mcp
-```
-
-Or without installing:
-
-```bash
-python -m confluence_mcp.server
-```
 
 ## Tools (5)
 
