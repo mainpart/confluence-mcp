@@ -25,7 +25,7 @@ api/confluence-openapi-v2.json — Confluence REST API v2 OpenAPI spec
 2. Add a `@mcp.tool()` async function in `server.py`
 3. Use `conf.request(method, path, params=..., json_data=...)` for API calls
 4. **Always post-process the response** — see "Output optimization" below
-5. **Do not expose `expand` as a tool parameter** — each tool fixes its own expand and post-processes accordingly
+5. `expand` may be exposed as a parameter if the tool documents its default value and available fields (see `get_content_by_id`). Otherwise, hardcode it.
 
 ### Tool template
 
@@ -43,8 +43,9 @@ async def my_tool(param: str) -> str:
 
 ## Expand strategy
 
-Each tool hardcodes its own `expand` parameter — **never expose it to the LLM**.
-Post-processing depends on knowing exactly which fields are present.
+Each tool hardcodes a default `expand` value. `expand` may be exposed as a tool parameter
+when documented (see `get_content_by_id`), but custom values may break post-processing
+if expected fields are missing.
 
 | Tool | expand | Why |
 |---|---|---|

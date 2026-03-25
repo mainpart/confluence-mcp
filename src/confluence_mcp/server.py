@@ -100,7 +100,14 @@ conf = ConfluenceClient(
     verify_ssl=os.environ.get("CONFLUENCE_VERIFY_SSL", "true").lower() not in ("false", "0", "no"),
 )
 
-mcp = FastMCP("confluence")
+mcp = FastMCP(
+    "confluence",
+    instructions=(
+        "Confluence wiki tools. "
+        "Inline comments: markerRef in get_comments output maps to "
+        "<ac:inline-comment-marker ac:ref=\"UUID\"> elements in body.storage of the page."
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +159,6 @@ def _maybe_save(json_str: str, save_path: str | None) -> str:
 @mcp.tool()
 async def get_content_by_id(
     id: str,
-    expand: str | None = None,
     status: str | None = None,
     save_path: str | None = None,
 ) -> str:
@@ -162,8 +168,7 @@ async def get_content_by_id(
         id: content ID
         save_path: if set, save JSON to this file instead of returning to LLM
     """
-    default_expand = "body.storage,version,history,space,ancestors,children.page,children.attachment"
-    params: dict = {"expand": expand or default_expand}
+    params: dict = {"expand": "body.storage,version,history,space,ancestors,children.page,children.attachment"}
     if status:
         params["status"] = status
     raw = _parse_response(await conf.request("GET", f"/content/{id}", params=params))
@@ -256,7 +261,6 @@ async def download_attachment(
 @mcp.tool()
 async def get_spaces(
     space_key: str | None = None,
-    type: str | None = None,
     status: str | None = None,
     label: str | None = None,
     favourite: bool | None = None,
@@ -264,7 +268,7 @@ async def get_spaces(
     limit: int | None = None,
     save_path: str | None = None,
 ) -> str:
-    """Get spaces. Returns key and name. Filter by space_key, type (global/personal), status, label, favourite.
+    """Get spaces. Returns key and name. Filter by space_key, status, label, favourite.
 
     Args:
         save_path: if set, save JSON to this file instead of returning to LLM
@@ -272,8 +276,6 @@ async def get_spaces(
     params = {}
     if space_key:
         params["spaceKey"] = space_key
-    if type:
-        params["type"] = type
     if status:
         params["status"] = status
     if label:
@@ -393,6 +395,7 @@ async def search(
     save_path: str | None = None,
 ) -> str:
     """Search Confluence. All filters are combined with AND.
+    For paginated results use start/limit params; check hasMore in the response.
 
     Args:
         query: full-text search
@@ -456,6 +459,40 @@ async def search(
         ensure_ascii=False,
     )
     return _maybe_save(result, save_path)
+
+
+# ===========================================================================
+# Users
+# ===========================================================================
+
+
+@mcp.tool()
+async def get_user(
+    username: str | None = None,
+    key: str | None = None,
+) -> str:
+    """Get user profile by username or userKey. Returns displayName, username, userKey.
+
+    Args:
+        username: Confluence username (e.g. U_M2P0J). From page URLs like /display/~U_M2P0J
+        key: Confluence userKey (e.g. 2c9cfcaa997c4dad...). From ri:userkey in page body HTML
+    """
+    if not username and not key:
+        return json.dumps({"error": "Provide username or key"})
+    params = {}
+    if username:
+        params["username"] = username
+    elif key:
+        params["key"] = key
+    raw = _parse_response(await conf.request("GET", "/user", params=params))
+    return json.dumps(
+        {
+            "displayName": raw.get("displayName"),
+            "username": raw.get("username"),
+            "userKey": raw.get("userKey"),
+        },
+        ensure_ascii=False,
+    )
 
 
 # ===========================================================================
