@@ -3,7 +3,7 @@ name = "confluence-mcp"
 version = "0.1.0"
 description = "MCP server for Confluence REST API"
 requires-python = ">=3.11"
-dependencies = ["fastmcp", "httpx"]
+dependencies = ["fastmcp>=3.4", "httpx"]
 
 [project.scripts]
 confluence-mcp = "confluence_mcp.server:main"
