@@ -8,14 +8,18 @@ API docs:
   v2: https://developer.atlassian.com/cloud/confluence/rest/v2/
 """
 
+import functools
 import json
 import logging
 import os
+import re
 import sys
+from typing import Annotated, Literal
 from urllib.parse import urljoin
 
 import httpx
 from fastmcp import FastMCP
+from pydantic import Field
 
 # ---------------------------------------------------------------------------
 # Logging — writes to stderr so it doesn't interfere with MCP stdio transport
@@ -117,7 +121,13 @@ mcp = FastMCP(
 
 class ConfluenceAPIError(Exception):
     """Raised when conf.request() returns a non-JSON error string."""
-    pass
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+_HTTP_ERROR_PREFIX = re.compile(r"^HTTP (\d{3}): ")
 
 
 def _parse_response(raw_str: str) -> dict | list:
@@ -132,7 +142,58 @@ def _parse_response(raw_str: str) -> dict | list:
         return json.loads(raw_str)
     except (json.JSONDecodeError, ValueError):
         log.error("Non-JSON API response: %s", raw_str[:300])
-        raise ConfluenceAPIError(raw_str)
+        m = _HTTP_ERROR_PREFIX.match(raw_str)
+        raise ConfluenceAPIError(raw_str, int(m.group(1)) if m else None)
+
+
+def _err_to_json(e: Exception) -> str:
+    """One error shape across every tool: `error`, `message`, and `status`
+    when there is one. The caller branches on a field instead of parsing
+    free text out of a protocol-level failure.
+    """
+    if isinstance(e, ConfluenceAPIError):
+        payload = {"error": "api_error", "message": str(e)}
+        # The status is the whole diagnosis of a transport failure — 401 and
+        # 404 need different reactions, and digging it back out of the text
+        # should not be the caller's job.
+        if e.status is not None:
+            payload["status"] = e.status
+        return json.dumps(payload, ensure_ascii=False)
+    if isinstance(e, ValueError):
+        return json.dumps({"error": "bad_request", "message": str(e)}, ensure_ascii=False)
+    return json.dumps({"error": "unexpected", "message": str(e)}, ensure_ascii=False)
+
+
+def _safe(func):
+    """Turn any escaping exception into the standard error JSON.
+
+    Wrapping is a backstop, not a substitute for handling: a tool that forgets
+    a try/except still returns a result the caller can branch on. functools.wraps
+    keeps the original signature and docstring, so FastMCP builds the same schema.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            return _err_to_json(e)
+
+    return wrapper
+
+
+def _unique_path(path: str) -> str:
+    """Never clobber an earlier save of a same-named file — append (1), (2), …
+
+    Silent overwrite is the worst failure mode here: the caller has no way to
+    notice that the previous download is gone.
+    """
+    stem, ext = os.path.splitext(path)
+    counter = 1
+    while os.path.exists(path):
+        path = f"{stem}({counter}){ext}"
+        counter += 1
+    return path
 
 
 def _maybe_save(json_str: str, save_path: str | None) -> str:
@@ -142,13 +203,24 @@ def _maybe_save(json_str: str, save_path: str | None) -> str:
     try:
         save_path = os.path.abspath(save_path)
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        save_path = _unique_path(save_path)
         with open(save_path, "w", encoding="utf-8") as f:
             data = json.loads(json_str)
             json.dump(data, f, ensure_ascii=False, indent=2)
         size = os.path.getsize(save_path)
         return f"Saved to {save_path} ({size} bytes)"
     except Exception as e:
-        return f"Error saving to {save_path}: {e}"
+        return _err_to_json(e)
+
+
+def _cql_quote(value: str) -> str:
+    """Escape a value for a double-quoted CQL literal.
+
+    A bare quote inside a value ends the literal and the rest of the value is
+    parsed as CQL — text an agent copied off a page could silently change what
+    the search means.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 # ===========================================================================
@@ -156,7 +228,17 @@ def _maybe_save(json_str: str, save_path: str | None) -> str:
 # ===========================================================================
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations={
+        "title": "Get Confluence Page",
+        # save_path is a convenience for the caller, not what the tool is for —
+        # reading a page stays read-only.
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
 async def get_content_by_id(
     id: str,
     status: str | None = None,
@@ -215,14 +297,22 @@ async def get_content_by_id(
 # ===========================================================================
 
 
-@mcp.tool()
-async def download_attachment(
-    id: str, attachment_id: str, save_path: str | None = None
-) -> str:
+@mcp.tool(
+    annotations={
+        "title": "Download Confluence Attachment",
+        # Fetching the file is the point of this tool, not a side convenience.
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        # A repeat call writes another file next to the first one (see _unique_path).
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
+async def download_attachment(attachment_id: str, save_path: str | None = None) -> str:
     """Download attachment content.
 
     Args:
-        id: page content ID (unused, kept for compatibility)
         attachment_id: the 'download' field from get_content_by_id attachments,
             e.g. "/download/attachments/123/file?version=1&api=v2"
         save_path: if set, save to this file instead of returning to LLM
@@ -234,19 +324,17 @@ async def download_attachment(
             resp = await client.get(url, headers=headers, timeout=30.0, follow_redirects=True)
             resp.raise_for_status()
             result = resp.content
+        except httpx.HTTPStatusError as e:
+            raise ConfluenceAPIError(str(e), e.response.status_code)
         except httpx.HTTPError as e:
-            return f"Error downloading: {e}"
-    if isinstance(result, str):
-        return result
+            raise ConfluenceAPIError(str(e))
     if save_path:
-        try:
-            save_path = os.path.abspath(save_path)
-            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-            with open(save_path, "wb") as f:
-                f.write(result)
-            return f"Saved {len(result)} bytes to {save_path}"
-        except OSError as e:
-            return f"Error saving: {e}"
+        save_path = os.path.abspath(save_path)
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        save_path = _unique_path(save_path)
+        with open(save_path, "wb") as f:
+            f.write(result)
+        return f"Saved {len(result)} bytes to {save_path}"
     try:
         return result.decode("utf-8")
     except UnicodeDecodeError:
@@ -258,14 +346,22 @@ async def download_attachment(
 # ===========================================================================
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations={
+        "title": "List Confluence Spaces",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
 async def get_spaces(
     space_key: str | None = None,
     status: str | None = None,
     label: str | None = None,
     favourite: bool | None = None,
-    start: int | None = None,
-    limit: int | None = None,
+    start: Annotated[int | None, Field(ge=0)] = None,
+    limit: Annotated[int | None, Field(ge=1)] = None,
     save_path: str | None = None,
 ) -> str:
     """Get spaces. Returns key and name. Filter by space_key, status, label, favourite.
@@ -290,7 +386,13 @@ async def get_spaces(
     spaces = [{"key": s["key"], "name": s["name"]} for s in raw.get("results", [])]
     has_more = "next" in raw.get("_links", {})
     result = json.dumps(
-        {"spaces": spaces, "start": raw.get("start"), "size": raw.get("size"), "hasMore": has_more},
+        {
+            "spaces": spaces,
+            "start": raw.get("start"),
+            "size": raw.get("size"),
+            "totalSize": raw.get("totalSize"),
+            "hasMore": has_more,
+        },
         ensure_ascii=False,
     )
     return _maybe_save(result, save_path)
@@ -301,12 +403,20 @@ async def get_spaces(
 # ===========================================================================
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations={
+        "title": "Get Confluence Comments",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
 async def get_comments(
     id: str,
     depth: str | None = None,
-    start: int | None = None,
-    limit: int | None = None,
+    start: Annotated[int | None, Field(ge=0)] = None,
+    limit: Annotated[int | None, Field(ge=1)] = None,
     save_path: str | None = None,
 ) -> str:
     """Get comments on a page or comment thread by content ID.
@@ -365,6 +475,7 @@ async def get_comments(
             "comments": comments,
             "start": raw.get("start"),
             "size": raw.get("size"),
+            "totalSize": raw.get("totalSize"),
             "hasMore": has_more,
         },
         ensure_ascii=False,
@@ -377,12 +488,20 @@ async def get_comments(
 # ===========================================================================
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations={
+        "title": "Search Confluence",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
 async def search(
     query: str | None = None,
     title: str | None = None,
     space_key: str | None = None,
-    type: str | None = None,
+    type: Literal["page", "blogpost", "comment", "attachment"] | None = None,
     contributor: str | None = None,
     creator: str | None = None,
     label: str | None = None,
@@ -390,8 +509,8 @@ async def search(
     parent: str | None = None,
     created_from: str | None = None,
     modified_from: str | None = None,
-    start: int | None = None,
-    limit: int | None = None,
+    start: Annotated[int | None, Field(ge=0)] = None,
+    limit: Annotated[int | None, Field(ge=1)] = None,
     save_path: str | None = None,
 ) -> str:
     """Search Confluence. All filters are combined with AND.
@@ -411,31 +530,35 @@ async def search(
         modified_from: lastModified >= date (YYYY-MM-DD)
         save_path: if set, save JSON to this file instead of returning to LLM
     """
+    # Every value goes through _cql_quote — see there for why concatenating raw
+    # values into CQL is not safe.
     cql_parts = []
     if query:
-        cql_parts.append(f'text~"{query}"')
+        cql_parts.append(f'text~"{_cql_quote(query)}"')
     if title:
-        cql_parts.append(f'title~"{title}"')
+        cql_parts.append(f'title~"{_cql_quote(title)}"')
     if space_key:
-        cql_parts.append(f'space="{space_key}"')
+        cql_parts.append(f'space="{_cql_quote(space_key)}"')
     if type:
-        cql_parts.append(f'type="{type}"')
+        cql_parts.append(f'type="{_cql_quote(type)}"')
     if contributor:
-        cql_parts.append(f'contributor="{contributor}"')
+        cql_parts.append(f'contributor="{_cql_quote(contributor)}"')
     if creator:
-        cql_parts.append(f'creator="{creator}"')
+        cql_parts.append(f'creator="{_cql_quote(creator)}"')
     if label:
-        cql_parts.append(f'label="{label}"')
+        cql_parts.append(f'label="{_cql_quote(label)}"')
     if ancestor:
-        cql_parts.append(f'ancestor="{ancestor}"')
+        cql_parts.append(f'ancestor="{_cql_quote(ancestor)}"')
     if parent:
-        cql_parts.append(f'parent="{parent}"')
+        cql_parts.append(f'parent="{_cql_quote(parent)}"')
     if created_from:
-        cql_parts.append(f'created>="{created_from}"')
+        cql_parts.append(f'created>="{_cql_quote(created_from)}"')
     if modified_from:
-        cql_parts.append(f'lastModified>="{modified_from}"')
+        cql_parts.append(f'lastModified>="{_cql_quote(modified_from)}"')
     if not cql_parts:
-        return json.dumps({"error": "Provide at least one search parameter"})
+        # _safe renders this as {"error": "bad_request", ...} — same shape as
+        # an API failure, so the caller has one thing to branch on.
+        raise ValueError("Provide at least one search parameter")
     params: dict = {"cql": " AND ".join(cql_parts), "expand": "space,version"}
     if start is not None:
         params["start"] = start
@@ -466,7 +589,15 @@ async def search(
 # ===========================================================================
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations={
+        "title": "Get Confluence User",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "openWorldHint": True,
+    }
+)
+@_safe
 async def get_user(
     username: str | None = None,
     key: str | None = None,
@@ -478,7 +609,7 @@ async def get_user(
         key: Confluence userKey (e.g. 2c9cfcaa997c4dad...). From ri:userkey in page body HTML
     """
     if not username and not key:
-        return json.dumps({"error": "Provide username or key"})
+        raise ValueError("Provide username or key")
     params = {}
     if username:
         params["username"] = username

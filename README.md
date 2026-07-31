@@ -44,15 +44,22 @@ curl -s -u 'your-username:your-password' \
 ```
 
 
-## Tools (5)
+## Tools (6)
 
 | Tool | Description |
 |---|---|
 | `get_content_by_id` | Page with body (storage format), ancestors, child pages, attachments |
-| `download_attachment` | Download attachment by content ID and attachment ID |
+| `download_attachment` | Download attachment by its `download` link |
 | `get_spaces` | List spaces (key + name), filter by type, status, label |
 | `get_comments` | Page comments (footer + inline with markerRef and originalSelection) |
 | `search` | Full-text search with filters: title, space, type, creator, contributor, label, ancestor, parent, dates |
+| `get_user` | User profile by username or userKey |
+
+## Errors
+
+Every tool returns errors as JSON instead of raising, so a caller can branch on
+a field: `{"error": "api_error" \| "bad_request" \| "unexpected", "message": "...",
+"status": 403}` (`status` only when the API answered with an HTTP code).
 
 ## License
 
